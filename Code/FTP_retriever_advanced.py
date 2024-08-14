@@ -1,153 +1,182 @@
-import pandas as pd
-import openpyxl
-from openpyxl.styles import Font
-import colorsys
-import pickle
-import logging
+import sys
 import os
-import json
-import ieugwaspy as ieu
+import ftplib
+import time
+import random
+from urllib.parse import urlparse
+from tqdm import tqdm
+from datetime import datetime
+from contextlib import contextmanager
+from colorama import Fore, init
 
-# Set up logging
-logging.basicConfig(filename='ieugwas_process.log', level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+init(autoreset=True)
 
-# Define the output Excel file path
-OUTPUT_FILE = "ieugwas_tnf_output_1.xlsx"
-
-def generate_color_palette(n):
-    colors = []
-    for i in range(n):
-        hue = i / n
-        rgb = colorsys.hsv_to_rgb(hue, 0.8, 0.8)
-        colors.append('FF{:02X}{:02X}{:02X}'.format(int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255)))
-    return colors
-
-def color_code_ids(df, existing_colors=None):
-    if existing_colors is None:
-        existing_colors = {}
-    
-    unique_ids = df['id'].dropna().unique()
-    new_ids = [id for id in unique_ids if id not in existing_colors]
-    
-    if new_ids:
-        new_colors = generate_color_palette(len(new_ids))
-        existing_colors.update(dict(zip(new_ids, new_colors)))
-    
-    df['id_color'] = df['id'].map(existing_colors)
-    
-    return df, existing_colors
-
-def search_and_process_data():
-    logging.info("Starting IEUGWAS data processing for 'tumor necrosis factor'")
-    
+@contextmanager
+def ftp_connection(host):
+    ftp = None
     try:
-        # Load JWT token from .ieugwaspy.json file
-        jwt_path = os.path.expanduser("~/.ieugwaspy.json")
-        if os.path.exists(jwt_path):
-            with open(jwt_path, 'r') as f:
-                jwt_token = json.load(f).get("jwt")
-                os.environ['IEUGWASPY_JWT'] = jwt_token
-        else:
-            logging.error("JWT token file not found.")
-            print("JWT token file not found.")
-            return
+        ftp = ftplib.FTP(host)
+        ftp.login()  # anonymous login
+        yield ftp
+    finally:
+        if ftp:
+            try:
+                ftp.quit()
+            except:
+                ftp.close()
 
-        # Query the GWAS database
-        gwas_info = ieu.gwasinfo()
+def ensure_dir_exists(directory):
+    os.makedirs(directory, exist_ok=True)
 
-        # Print and log the structure of gwas_info
-        print("Type of gwas_info:", type(gwas_info))
-        logging.info(f"Type of gwas_info: {type(gwas_info)}")
-
-        # Check if gwas_info is a dictionary and convert to a list
-        if isinstance(gwas_info, dict):
-            gwas_entries = list(gwas_info.values())
-            print("First 5 entries of gwas_entries:", gwas_entries[:5])
-            logging.info(f"First 5 entries of gwas_entries: {gwas_entries[:5]}")
-
-            # Filter for studies related to tumor necrosis factor
-            search_results = [study for study in gwas_entries if isinstance(study, dict) and "TNF" in study.get('trait', '').lower()]
-        else:
-            logging.error("GWAS Info is not in the expected dict format.")
-            return
-
-        logging.info(f"Found {len(search_results)} studies related to 'tumor necrosis factor'")
-        
-        # Convert search results to DataFrame
-        df = pd.DataFrame(search_results)
-        
-        # Select relevant columns
-        selected_columns = ['id', 'trait', 'year', 'author', 'pmid', 'population', 
-                            'sample_size', 'nsnp', 'unit', 'sex', 'category', 'subcategory']
-        df = df[selected_columns]
-        
-        # Check if the output Excel file exists
+def retry_with_backoff(func, max_retries=5, initial_delay=1, max_delay=60):
+    retries = 0
+    while True:
         try:
-            existing_data = pd.read_excel(OUTPUT_FILE, sheet_name="IEUGWAS TNF Data", dtype=str, engine='openpyxl')
-            with open(OUTPUT_FILE.replace('.xlsx', '_color_map.pkl'), 'rb') as f:
-                color_map = pickle.load(f)
-            
-            # Identify new studies
-            existing_ids = set(existing_data['id'])
-            new_ids = set(df['id']) - existing_ids
-            
-            # Filter df to include only new studies
-            df = df[df['id'].isin(new_ids)]
-            
-            # Append new data to existing data
-            combined_data = pd.concat([existing_data, df], ignore_index=True)
-            logging.info(f"Appending {len(df)} new studies to existing data")
-        except FileNotFoundError:
-            combined_data = df
-            color_map = {}
-            logging.info("Creating new output file")
-        except Exception as e:
-            logging.error(f"Error reading existing file: {e}")
-            logging.info("Creating new output file")
-            combined_data = df
-            color_map = {}
-        
-        # Color-code study IDs
-        result_df, updated_color_map = color_code_ids(combined_data, color_map)
-        
-        # Create a new workbook or load existing one
-        if os.path.exists(OUTPUT_FILE):
-            wb = openpyxl.load_workbook(OUTPUT_FILE)
-            ws = wb["IEUGWAS TNF Data"]
-            # Clear existing data (except header)
-            ws.delete_rows(2, ws.max_row)
-        else:
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = "IEUGWAS TNF Data"
-        
-        # Write data to the worksheet
-        for r, row in enumerate(result_df.values, start=1):
-            for c, value in enumerate(row, start=1):
-                ws.cell(row=r, column=c, value=value)
-        
-        # Apply color formatting to ID column
-        id_col = result_df.columns.get_loc("id") + 1
-        for r, color in enumerate(result_df['id_color'], start=2):
-            if pd.notna(color):
-                cell = ws.cell(row=r, column=id_col)
-                cell.font = Font(color=color)
-        
-        # Save the workbook
-        wb.save(OUTPUT_FILE)
-        
-        # Save the updated color map
-        with open(OUTPUT_FILE.replace('.xlsx', '_color_map.pkl'), 'wb') as f:
-            pickle.dump(updated_color_map, f)
-        
-        logging.info(f"Data processed and exported to {OUTPUT_FILE}")
-        logging.info(f"Total studies in output: {len(result_df)}")
-        
-    except Exception as e:
-        logging.error(f"An error occurred during processing: {e}")
-        print(f"An error occurred: {e}")
+            return func()
+        except ftplib.error_temp as e:
+            if retries >= max_retries:
+                raise Exception(f"Max retries reached. Last error: {e}")
+            delay = min(initial_delay * (2 ** retries) + random.uniform(0, 1), max_delay)
+            print(f"Temporary error: {e}. Retrying in {delay:.2f} seconds...")
+            time.sleep(delay)
+            retries += 1
 
-# Run the main function
+def format_time(seconds):
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{int(hours):02d}:{int(minutes):02d}:{seconds:05.2f}"
+
+def download_ftp_item(ftp, remote_path, local_path, position):
+    def download_attempt():
+        nonlocal start_time
+        file_size = ftp.size(remote_path)
+        
+        print(f"Downloading: {os.path.basename(local_path)}")
+        print(f"Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        with open(local_path, 'wb') as local_file:
+            with tqdm(total=file_size, unit='B', unit_scale=True, ncols=100, position=position, leave=True, colour='green') as pbar:
+                def callback(data):
+                    local_file.write(data)
+                    pbar.update(len(data))
+                
+                ftp.retrbinary(f"RETR {remote_path}", callback)
+
+    try:
+        ensure_dir_exists(os.path.dirname(local_path))
+        start_time = datetime.now()
+        retry_with_backoff(download_attempt)
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        print(f"Downloaded file: {local_path}")
+        print(f"Finished at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Download duration: {format_time(duration)}")
+    except ftplib.error_perm as e:
+        if str(e).startswith('550'):
+            print(f"{Fore.CYAN}{remote_path} is a directory. Entering...")
+            download_ftp_directory(ftp, remote_path, local_path, position)
+        else:
+            print(f"{Fore.LIGHTRED_EX}Error downloading {remote_path}: {e}")
+    except Exception as e:
+        print(f"{Fore.LIGHTRED_EX}Failed to download {remote_path} after multiple retries: {e}")
+
+
+def directory_exists(ftp, path):
+    current = ftp.pwd()
+    try:
+        ftp.cwd(path)
+        ftp.cwd(current)
+        return True
+    except ftplib.error_perm:
+        return False
+
+def download_ftp_directory(ftp, remote_dir, local_dir, position=0):
+    if not directory_exists(ftp, remote_dir):
+        print(f"{Fore.LIGHTRED_EX}Error: Directory {remote_dir} does not exist on the server.")
+        return
+    
+    ensure_dir_exists(local_dir)
+
+    def change_directory():
+        ftp.cwd(remote_dir)
+
+    try:
+        retry_with_backoff(change_directory)
+    except Exception as e:
+        print(f"{Fore.LIGHTRED_EX}Error: Cannot access directory {remote_dir}. Error: {e}")
+        return
+
+    print(f"{Fore.BLUE}Entering directory: {remote_dir}")
+    
+    def list_items():
+        items = []
+        ftp.dir(items.append)
+        return items
+
+    items = retry_with_backoff(list_items)
+    
+    for index, item in enumerate(items):
+        tokens = item.split(maxsplit=8)
+        if len(tokens) < 9:
+            continue
+        
+        item_name = tokens[8]
+        item_type = tokens[0][0]
+        
+        remote_path = f"{remote_dir}/{item_name}"
+        local_path = os.path.join(local_dir, item_name)
+        
+        if item_type == 'd':
+            download_ftp_directory(ftp, remote_path, local_path, position + index)
+        else:
+            download_ftp_item(ftp, remote_path, local_path, position + index)
+    
+    ftp.cwd('..')
+    print(f"{Fore.BLUE}Leaving directory: {remote_dir}")
+
+def download_from_ftp_url(ftp_url, accession):
+    parsed_url = urlparse(ftp_url)
+    ftp_host = parsed_url.netloc
+    ftp_path = parsed_url.path
+
+    with ftp_connection(ftp_host) as ftp:
+        start_time = datetime.now()
+        print(f"{Fore.GREEN}Starting download for {accession} at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        download_ftp_directory(ftp, ftp_path, accession)
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        print(f"{Fore.GREEN}Finished download for {accession} at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Total download time for {accession}: {format_time(duration)}")
+
+    print(f"All available files have been downloaded to the '{accession}' directory.")
+
+def construct_ftp_url(accession):
+    base_url = "ftp://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics/"
+    
+    if accession.startswith("GCST9"):
+        # New format (e.g., GCST90243138)
+        accession_num = int(accession[4:])
+        range_start = (accession_num // 1000) * 1000 + 1
+        range_end = range_start + 999
+        return f"{base_url}GCST{range_start:08d}-GCST{range_end:08d}/{accession}/"
+    else:
+        # Old format (e.g., GCST004426)
+        accession_num = int(accession[4:])
+        range_start = (accession_num // 1000) * 1000 + 1
+        range_end = range_start + 999
+        return f"{base_url}GCST{range_start:06d}-GCST{range_end:06d}/{accession}/"
+
+def download_gwas_data(accession):
+    ftp_url = construct_ftp_url(accession)
+    print(f"{Fore.GREEN}Attempting to download data for {accession}")
+    print(f"FTP URL: {ftp_url}")
+    download_from_ftp_url(ftp_url, accession)
+
 if __name__ == "__main__":
-    search_and_process_data()
+    if len(sys.argv) < 2:
+        print("Usage: python script_name.py <study_accession1> [<study_accession2> ...]")
+        sys.exit(1)
+    
+    for accession in sys.argv[1:]:
+        download_gwas_data(accession)
+        time.sleep(1)  # Add a small delay between accessions to avoid overwhelming the server

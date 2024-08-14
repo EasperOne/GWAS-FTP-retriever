@@ -1,6 +1,8 @@
 # GWAS-FTP-retriever
 This github repo contains only a Python script designed to automate the download of Genome-Wide Association Study (GWAS) summary statistics from an FTP server of NHGRI-EBI GWAS catalog. The script is particularly useful for downloading data related to specific study accessions from the GWAS catalog hosted by the European Bioinformatics Institute (EBI).
 
+Made by Ho Vu Hoang Khoa
+
 ## Usage:
 ```
 python FTP_retriever_advanced.py <Accession number 1> <Accession number 2> ...

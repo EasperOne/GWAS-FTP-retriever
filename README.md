@@ -3,10 +3,16 @@ This github repo contains only a Python script designed to automate the download
 
 Made by Ho Vu Hoang Khoa
 
+## Installation:
+Directly download the script or you can do the fancy way git clone this repo.
+
 ## Usage:
 ```
 python FTP_retriever_advanced.py <Accession number 1> <Accession number 2> ...
 ```
+## Workflow
+
+![alt text](image.png)
 
 ## Features
 

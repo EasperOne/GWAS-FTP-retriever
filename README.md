@@ -12,7 +12,10 @@ python FTP_retriever_advanced.py <Accession number 1> <Accession number 2> ...
 ```
 ## Workflow
 
-![alt text](image.png)
+<p align="center">
+  <img src="DiagramREADME.png" />
+</p>
+
 
 ## Features
 
